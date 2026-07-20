@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: blm
+      POSTGRES_PASSWORD: blm_dev
+      POSTGRES_DB: blm_roundrobin
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blm"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8420:8420"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8420"
+      DATABASE_URL: "postgresql+asyncpg://blm:blm_dev@db:5432/blm_roundrobin"
+      BLM_ENV: "development"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8420 --reload
+
+volumes:
+  pgdata:

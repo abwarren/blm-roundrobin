@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+*.db
+*.db-shm
+*.db-wal
+
+# Node
+node_modules/
+dist/
+*.js.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Docker
+pgdata/
+
+# Coverage
+coverage/
+.coverage
+htmlcov/
+
+# Build
+*.egg
+dist/
+build/
