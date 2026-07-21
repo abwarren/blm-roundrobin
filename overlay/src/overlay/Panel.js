@@ -171,32 +171,61 @@ export class Panel {
         if (this._selectedLegs.length < 2) {
             this._el.querySelector('.blm-results-section').style.display = 'none';
             this._el.querySelector('.blm-scenario-section').style.display = 'none';
+            this._populateButton.setEnabled(false);
             return;
         }
 
+        // Show loading
+        this._el.querySelector('.blm-results-section').style.display = 'block';
+        this._resultsPanel.showLoading();
+
         try {
-            const response = await this._api.generateCombinations({
-                selections: this._selectedLegs,
-                folds: this._systemConfig.folds,
-                stakePerCombo: this._systemConfig.stake / this._countCombinations(),
-            });
+            const stake = parseFloat(this._systemConfig.stake) || 10;
+            const perCombo = stake / Math.max(1, this._countCombinations());
+
+            const response = await this._api.generateCombinations(
+                this._selectedLegs,
+                this._systemConfig.folds || [2],
+                perCombo
+            );
 
             this._combinations = response;
             this._resultsPanel.render(response);
             this._summaryBar.render(response.summary);
             this._scenarioView.render(response, this._selectedLegs);
-            this._el.querySelector('.blm-results-section').style.display = 'block';
             this._el.querySelector('.blm-scenario-section').style.display = 'block';
+            this._populateButton.setEnabled(response.combinations && response.combinations.length > 0);
         } catch (err) {
-            // Client-side fallback for small N
-            this._clientSideGenerate();
+            console.warn('[BLM] Backend API error:', err);
+            this.showError('Backend unreachable at ' + (this._api._baseUrl || 'localhost:8420'));
+            this._el.querySelector('.blm-results-section').style.display = 'none';
+            this._populateButton.setEnabled(false);
         }
     }
 
-    _clientSideGenerate() {
-        // Basic client-side combo generation (limited)
-        // TODO: Implement simple combinatorics inline
-        this.showError('Backend unreachable — client-side gen limited');
+    _countCombinations() {
+        // Estimate total combos for this selection set + folds
+        const n = this._selectedLegs.length;
+        const folds = this._systemConfig.folds || [2];
+        let total = 0;
+        for (const k of folds) {
+            if (k <= n) {
+                // nCr approximation
+                total += this._nCr(n, k);
+            }
+        }
+        return Math.max(1, total);
+    }
+
+    _nCr(n, r) {
+        if (r > n) return 0;
+        if (r === 0 || r === n) return 1;
+        r = Math.min(r, n - r);
+        let res = 1;
+        for (let i = 1; i <= r; i++) {
+            res = res * (n - i + 1) / i;
+        }
+        return res;
     }
 
     async _onPopulate() {

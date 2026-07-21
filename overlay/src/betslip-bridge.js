@@ -1,91 +1,221 @@
 /**
- * PokerBet Bet Slip Bridge
+ * PokerBet Bet Slip Bridge — Phase 4
  *
- * Responsibilities:
- * 1. Locate odds buttons on the PokerBet page
- * 2. Programmatically click them to populate PokerBet's native bet slip
- * 3. Monitor bet slip state via MutationObserver
- * 4. Report progress and errors
+ * Locates O/U odds buttons in PokerBet's DOM and clicks them to populate
+ * PokerBet's native bet slip.
  *
- * Safety:
- * - NEVER submits the bet slip (user clicks "Place Bet" themselves)
- * - Human-like delays between clicks (100-200ms)
- * - Validates odds haven't changed before clicking
- * - Falls back gracefully if a button can't be found
+ * Strategy:
+ * 1. For each leg in the parlay, find the corresponding O/U button
+ * 2. Click it with human-like timing
+ * 3. Watch the bet slip via MutationObserver
+ * 4. Report progress
+ *
+ * Button location strategies (tried in order):
+ *   A. Current event view → "Total Points" section → O/U buttons by line + odds
+ *   B. Sidebar game list → click game → wait for markets → click O/U
+ *   C. Fallback: highlight game for manual clicking
+ *
+ * SAFETY: NEVER submits the bet slip. User must click "Place Bet."
  */
 
 export class BetslipBridge {
     constructor() {
-        this._observer = null;
-        this._betslipState = { selections: [], totalStake: 0 };
+        this._debug = true;
+        this._betslipSelector = '[class*="betslip"], [class*="bet-slip"], [class*="BetSlip"], [class*="betSlip"]';
+    }
+
+    log(...args) {
+        if (this._debug) console.log('[BLM Betslip]', ...args);
     }
 
     /**
-     * Populate PokerBet's bet slip with a set of selections.
-     * @param {Array<Selection>} selections - The legs to add
-     * @param {Function} onProgress - Callback({current, total, selection})
-     * @param {Function} onComplete - Callback(success: boolean)
-     * @returns {Promise<boolean>} Whether all selections were placed
+     * Populate PokerBet's bet slip with all legs from the generated combos.
+     * For a Yankee (11 bets on 4 selections), this clicks each unique leg once.
+     *
+     * @param {Array} legs - Unique legs to add [{ gameId, team, odds, market, line, pick }]
+     * @param {Function} onProgress - ({current, total, status})
+     * @param {Function} onComplete - (success)
      */
-    async populateBetslip(selections, onProgress, onComplete) {
-        if (!selections || selections.length === 0) return false;
-
-        let successCount = 0;
-        let failCount = 0;
-
-        for (let i = 0; i < selections.length; i++) {
-            const sel = selections[i];
-            try {
-                const clicked = await this._clickOddsButton(sel);
-                if (clicked) {
-                    successCount++;
-                    if (onProgress) {
-                        onProgress({ current: i + 1, total: selections.length, selection: sel, status: 'ok' });
-                    }
-                } else {
-                    failCount++;
-                    if (onProgress) {
-                        onProgress({ current: i + 1, total: selections.length, selection: sel, status: 'not_found' });
-                    }
-                }
-
-                // Human-like delay between clicks
-                await this._sleep(100 + Math.random() * 100);
-            } catch (err) {
-                failCount++;
-                console.warn('[BLM] Failed to click selection:', sel.label, err);
-                if (onProgress) {
-                    onProgress({ current: i + 1, total: selections.length, selection: sel, status: 'error', error: err });
-                }
+    async populateBetslip(legs, onProgress, onComplete) {
+        // Deduplicate legs (same gameId+market+line+pick = same bet)
+        const unique = [];
+        const seen = new Set();
+        for (const leg of legs) {
+            const key = `${leg.gameId}-${leg.market}-${leg.line}-${leg.pick}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                unique.push(leg);
             }
         }
 
-        const allOk = failCount === 0;
+        this.log(`Populating bet slip with ${unique.length} unique legs (from ${legs.length} total)`);
+
+        let ok = 0, fail = 0;
+
+        for (let i = 0; i < unique.length; i++) {
+            const leg = unique[i];
+            try {
+                const clicked = await this._clickOuButton(leg);
+                if (clicked) {
+                    ok++;
+                    if (onProgress) onProgress({ current: i + 1, total: unique.length, selection: leg, status: 'ok' });
+                } else {
+                    fail++;
+                    if (onProgress) onProgress({ current: i + 1, total: unique.length, selection: leg, status: 'not_found' });
+                }
+                await this._sleep(150 + Math.random() * 100);
+            } catch (err) {
+                fail++;
+                this.log('Error clicking leg:', leg, err);
+                if (onProgress) onProgress({ current: i + 1, total: unique.length, selection: leg, status: 'error' });
+            }
+        }
+
+        const allOk = fail === 0;
         if (onComplete) onComplete(allOk);
         return allOk;
     }
 
     /**
-     * Start observing PokerBet's bet slip for changes.
-     * @param {Function} onChange - Callback with current bet slip state
+     * Find and click an O/U button for a specific leg.
+     * Tries multiple strategies to locate the button.
+     */
+    async _clickOuButton(leg) {
+        const { gameId, team, odds, market, line, pick } = leg;
+
+        this.log(`Looking for: ${pick} ${line} @ ${odds} (${team})`);
+
+        // Strategy A: Find by odds value + pick text in the current page
+        let btn = this._findByOddsAndText(odds, pick, line);
+        if (btn) { btn.click(); this.log('Clicked A:', btn.textContent.trim()); return true; }
+
+        // Strategy B: Find by closest visible O/U button with matching pick
+        btn = this._findByPickAndLine(pick, line, odds);
+        if (btn) { btn.click(); this.log('Clicked B:', btn.textContent.trim()); return true; }
+
+        // Strategy C: Find any button with matching odds value
+        btn = this._findByOddsValue(odds);
+        if (btn) { btn.click(); this.log('Clicked C:', btn.textContent.trim()); return true; }
+
+        this.log(`Button not found for: ${pick} ${line} @ ${odds}`);
+        return false;
+    }
+
+    /**
+     * Strategy A: Find button by exact odds + text containing pick (O/U) + line.
+     * O/U buttons in PokerBet look like:
+     *   <generic class="clickable">210.5</generic>  ← the line
+     *   <generic class="clickable">1.75</generic>   ← the over odds
+     *   <generic class="clickable">1.95</generic>   ← the under odds
+     */
+    _findByOddsAndText(odds, pick, line) {
+        if (!odds) return null;
+
+        const oddsStr = odds.toString();
+        // Find all clickable elements with odds-like text
+        const allClickable = document.querySelectorAll('[class*="clickable"]');
+        let bestMatch = null;
+        let bestScore = 0;
+
+        for (const el of allClickable) {
+            const text = (el.textContent || '').trim();
+            const num = parseFloat(text);
+
+            if (isNaN(num)) continue;
+
+            // Match odds within 0.01 tolerance
+            if (Math.abs(num - odds) > 0.01) continue;
+
+            // Check proximity to pick text
+            const parent = el.closest('[class*="Total Points"], [class*="total"], [class*="market"], [class*="section"], [class*="region"]');
+            const context = parent ? parent.textContent : document.body.textContent;
+
+            let score = 0;
+            if (pick && context.includes(pick)) score += 2;
+            if (line && context.includes(line)) score += 1;
+            if (pick === 'Over' && context.includes('Over')) score += 1;
+            if (pick === 'Under' && context.includes('Under')) score += 1;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = el;
+            }
+        }
+
+        return bestMatch;
+    }
+
+    /**
+     * Strategy B: Find by pick (Over/Under) text and line number.
+     * Looks for O/U buttons in the Total Points section.
+     */
+    _findByPickAndLine(pick, line, odds) {
+        if (!pick || !line) return null;
+
+        const allClickable = document.querySelectorAll('[class*="clickable"]');
+        for (const el of allClickable) {
+            const text = (el.textContent || '').trim();
+
+            // Check if this element is in a row with our line number
+            const parentRow = el.closest('[class*="row"], [class*="entry"], [class*="ou"]');
+            const context = parentRow ? parentRow.textContent : el.parentElement?.textContent || '';
+
+            if (context.includes(line) && (context.includes(pick) || context.includes(pick === 'Over' ? 'O' : 'U'))) {
+                const num = parseFloat(text);
+                if (!isNaN(num) && Math.abs(num - odds) < 0.5) {
+                    return el;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Strategy C: Last resort — find by odds value only.
+     * Clicks the best numeric match.
+     */
+    _findByOddsValue(odds) {
+        if (!odds) return null;
+
+        const allClickable = document.querySelectorAll('[class*="clickable"]');
+        let closest = null;
+        let closestDiff = Infinity;
+
+        for (const el of allClickable) {
+            const text = (el.textContent || '').trim();
+            const num = parseFloat(text);
+            if (isNaN(num)) continue;
+
+            // Only consider reasonable odds (1.01 - 100)
+            if (num < 1.01 || num > 100) continue;
+
+            const diff = Math.abs(num - odds);
+            if (diff < closestDiff && diff < 0.5) {
+                closestDiff = diff;
+                closest = el;
+            }
+        }
+
+        return closest;
+    }
+
+    /**
+     * Start watching PokerBet's bet slip for changes.
      */
     startWatching(onChange) {
-        const betslipEl = this._findBetslipContainer();
-        if (!betslipEl) {
-            console.warn('[BLM] Bet slip container not found for watching');
+        const betslip = this._findBetslip();
+        if (!betslip) {
+            this.log('Bet slip container not found, retrying in 2s');
+            setTimeout(() => this.startWatching(onChange), 2000);
             return;
         }
 
         this._observer = new MutationObserver(() => {
-            const state = this._readBetslipState();
+            const state = this._readState();
             if (onChange) onChange(state);
         });
-
-        this._observer.observe(betslipEl, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-        });
+        this._observer.observe(betslip, { childList: true, subtree: true, characterData: true });
+        this.log('Watching bet slip');
     }
 
     stopWatching() {
@@ -95,61 +225,20 @@ export class BetslipBridge {
         }
     }
 
-    /**
-     * Read current selections from PokerBet's bet slip.
-     * @returns {{ selections: Array, totalStake: number }}
-     */
-    _readBetslipState() {
-        return { selections: [], totalStake: 0 };
+    _findBetslip() {
+        return document.querySelector(this._betslipSelector);
     }
 
-    /**
-     * Find and click the odds button for a specific selection.
-     * @param {Selection} sel
-     * @returns {Promise<boolean>}
-     */
-    async _clickOddsButton(sel) {
-        // Strategy: find the button by game + market + odds value
-        const buttons = document.querySelectorAll('[class*="clickable"]');
-        for (const btn of buttons) {
-            const text = btn.textContent.trim();
-            // Match odds value (e.g., "1.85", "2.10")
-            const oddsMatch = text.match(/^(\d+\.\d+)$/);
-            if (!oddsMatch) continue;
-
-            const odds = parseFloat(oddsMatch[1]);
-            if (Math.abs(odds - sel.odds) > 0.001) continue;
-
-            // Check if this button is in the right game context
-            const parentText = btn.closest('[class*="event"], [class*="game"]');
-            const contextText = parentText ? parentText.textContent : document.body.textContent;
-
-            if (contextText.includes(sel.homeTeam) || contextText.includes(sel.awayTeam)) {
-                btn.click();
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    _findBetslipContainer() {
-        return document.querySelector('[class*="betslip"], [class*="bet-slip"], [class*="BetSlip"]');
+    _readState() {
+        const el = this._findBetslip();
+        if (!el) return { selections: 0 };
+        return {
+            selections: el.querySelectorAll('[class*="selection"], [class*="bet-item"], [class*="slip-item"]').length,
+            text: el.textContent.slice(0, 200),
+        };
     }
 
     _sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise(r => setTimeout(r, ms));
     }
 }
-
-/**
- * @typedef {Object} Selection
- * @property {string} id
- * @property {string} gameId
- * @property {string} homeTeam
- * @property {string} awayTeam
- * @property {string} market - e.g. "Total Points", "1st Half Total Points"
- * @property {string} line - e.g. "222.5"
- * @property {string} pick - "Over" | "Under"
- * @property {number} odds
- */

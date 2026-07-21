@@ -368,4 +368,31 @@ export const BLM_STYLES = `
     background: #16213e;
     border-radius: 4px;
 }
+/* ── Loading ────────────────────────────────────── */
+.blm-loading {
+    text-align: center;
+    color: #888;
+    font-size: 11px;
+    padding: 20px 0;
+}
+
+/* ── BLM Badge ──────────────────────────────────── */
+.blm-combo-blm {
+    font-size: 9px;
+    color: #00d4aa;
+    font-weight: 700;
+    background: #00d4aa22;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin: 0 4px;
+}
+.blm-blm-summary {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: #888;
+    padding: 6px 0;
+    border-top: 1px solid #2d2d4a;
+    margin-top: 6px;
+}
 `;
