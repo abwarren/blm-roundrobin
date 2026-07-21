@@ -30,6 +30,7 @@ export class Panel {
         this._selectedLegs = [];
         this._systemConfig = { folds: [2], stake: 10 };
         this._combinations = null;
+        this._currentMarkets = null;
         this._el = null;
     }
 
@@ -100,9 +101,16 @@ export class Panel {
         this._restoreSession();
     }
 
-    updateGames(games) {
+    updateGameList(games) {
         this._games = games;
-        this._gameList.render(games, this._selectedLegs);
+        this._gameList.render(games, this._selectedLegs, this._currentMarkets);
+        this._systemPicker.updateN(games.length);
+    }
+
+    updateMarkets(markets) {
+        this._currentMarkets = markets;
+        // Re-render game list with markets for the current game
+        this._gameList.render(this._games, this._selectedLegs, markets);
     }
 
     toggleCollapse() {
@@ -120,27 +128,25 @@ export class Panel {
 
     // ── State Management ─────────────────────────────────────
 
-    _onGameToggle(gameId, team, odds) {
-        // Check same-game restriction
+    _onGameToggle(leg) {
+        // leg = { id, gameId, team, odds, market, line, pick }
+        if (!leg || !leg.gameId) return;
+
         const existingGameIds = this._selectedLegs.map(l => l.gameId);
-        if (existingGameIds.includes(gameId)) {
-            // Check if we're toggling off or switching team
-            const existing = this._selectedLegs.find(l => l.gameId === gameId);
-            if (existing && existing.team !== team) {
-                // Replace the selection for this game
-                this._selectedLegs = this._selectedLegs.filter(l => l.gameId !== gameId);
-            } else if (existing && existing.team === team) {
-                // Toggle off
-                this._selectedLegs = this._selectedLegs.filter(l => l.gameId !== gameId);
+        if (existingGameIds.includes(leg.gameId)) {
+            const existing = this._selectedLegs.find(l => l.gameId === leg.gameId);
+            if (existing && existing.id === leg.id) {
+                // Same leg clicked again → remove
+                this._selectedLegs = this._selectedLegs.filter(l => l.id !== leg.id);
                 this._updateUI();
+                this._saveSession();
                 return;
             }
+            // Different leg for same game → replace
+            this._selectedLegs = this._selectedLegs.filter(l => l.gameId !== leg.gameId);
         }
 
-        if (team) {
-            this._selectedLegs.push({ gameId, team, odds, id: `${gameId}-${team}` });
-        }
-
+        this._selectedLegs.push(leg);
         this._updateUI();
         this._saveSession();
     }
@@ -219,8 +225,8 @@ export class Panel {
         // Update leg count
         this._el.querySelector('.blm-leg-count').textContent = this._selectedLegs.length;
 
-        // Re-render game list with selection state
-        this._gameList.render(this._games, this._selectedLegs);
+        // Re-render game list with selection state + current markets
+        this._gameList.render(this._games, this._selectedLegs, this._currentMarkets);
 
         // Re-render parlay legs
         this._parlayLegs.render(this._selectedLegs);

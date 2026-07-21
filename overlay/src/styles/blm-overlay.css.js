@@ -91,41 +91,81 @@ export const BLM_STYLES = `
     background: #16213e;
     border-radius: 6px;
     border: 1px solid #2d2d4a;
+    cursor: pointer;
+    transition: border-color 0.15s;
 }
-.blm-game-info {
+.blm-game-row:hover { border-color: #3a3a5c; }
+.blm-game-row.active { border-color: #00d4aa; }
+
+.blm-game-header {
     display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: 6px;
     margin-bottom: 4px;
 }
+.blm-game-teams { display: flex; align-items: center; gap: 4px; }
 .blm-team-home, .blm-team-away {
     font-weight: 600;
     font-size: 11px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 90px;
+    max-width: 85px;
 }
 .blm-score { color: #aaa; font-size: 11px; font-weight: 600; }
-.blm-period { color: #666; font-size: 10px; margin-left: auto; }
-.blm-game-odds {
+.blm-game-meta { display: flex; gap: 4px; align-items: center; }
+.blm-period { color: #666; font-size: 10px; }
+.blm-clock { color: #888; font-size: 10px; }
+.blm-league { color: #555; font-size: 9px; margin-left: 4px; }
+
+/* ── O/U Buttons ────────────────────────────────── */
+.blm-game-ou { margin-top: 4px; }
+.blm-ou-group {
     display: flex;
-    gap: 4px;
+    align-items: center;
+    gap: 3px;
+    margin-bottom: 3px;
+    flex-wrap: wrap;
 }
-.blm-odds-btn {
-    flex: 1;
-    padding: 3px 8px;
+.blm-ou-label {
+    font-size: 9px;
+    color: #666;
+    font-weight: 600;
+    min-width: 40px;
+    text-transform: uppercase;
+}
+.blm-ou-entries {
+    display: flex;
+    gap: 3px;
+    flex-wrap: wrap;
+}
+.blm-ou-btn {
+    padding: 2px 6px;
     border: 1px solid #3a3a5c;
     border-radius: 4px;
     background: #1a1a2e;
-    color: #ccc;
-    font-size: 11px;
+    color: #aaa;
+    font-size: 10px;
     cursor: pointer;
-    text-align: center;
-    transition: all 0.15s;
+    white-space: nowrap;
+    transition: all 0.12s;
 }
-.blm-odds-btn:hover { border-color: #00d4aa; color: #00d4aa; }
-.blm-odds-btn.selected { background: #00d4aa; color: #1a1a2e; border-color: #00d4aa; font-weight: 700; }
+.blm-ou-btn:hover { border-color: #00d4aa; color: #00d4aa; }
+.blm-ou-btn.selected {
+    background: #00d4aa22;
+    border-color: #00d4aa;
+    color: #00d4aa;
+    font-weight: 700;
+}
+.blm-ou-btn .blm-ou-odds { color: #888; margin-left: 2px; }
+.blm-ou-btn.selected .blm-ou-odds { color: #5ae0c0; }
+.blm-ou-hint {
+    font-size: 10px;
+    color: #555;
+    display: block;
+    padding: 4px 0;
+}
+
 
 /* ── Parlay Legs ────────────────────────────────── */
 .blm-leg-chip {
