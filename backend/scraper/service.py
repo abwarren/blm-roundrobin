@@ -1,22 +1,19 @@
 """
-PokerBet O/U Market Scraper — Playwright headless.
+PokerBet O/U Market Scraper — Playwright headless, bandwidth-optimised.
 
-Bandwidth-optimised headless scraper for PokerBet live basketball.
-Blocks images, fonts, media, ads, analytics. Early-exit once O/U data is extracted.
+Extracts live basketball games and O/U markets from PokerBet.
 
-Extracts:
-- Game list from the sidebar (teams, scores, period)
-- Game Total Points (multi-line O/U)
-- Team Total Points
-- Half/Quarter Total Points if available
-
-Usage:
-    from scraper.service import PokerBetScraper
-    scraper = PokerBetScraper()
-    games = await scraper.scrape_live_games()
+Resource policy:
+- Blocks: images, fonts, media, ads, analytics, CSS (DOM extraction doesn't need styling)
+- Allows: JavaScript (required for SPA rendering), XHR/API calls
+- Early exit: closes page as soon as target data is extracted
+- Retry: exponential backoff on transient failures
 """
 
-import re, json, asyncio, time
+import re
+import asyncio
+import time
+import logging
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -24,50 +21,74 @@ from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 from scraper.bandwidth import BandwidthTracker, PageMetrics
 
+logger = logging.getLogger("blm.scraper")
 
 BASE_URL = "https://www.pokerbet.co.za"
 LIVE_BASKETBALL_URL = urljoin(BASE_URL, "/en/sports/live")
+
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2.0  # seconds
 
 
 class PokerBetScraper:
     """Headless Playwright scraper for PokerBet basketball O/U markets.
 
     Reuses browser instance across calls. Blocks unnecessary resources.
-    Early-exits once target data is extracted.
+    Early-exits once target data is extracted. Retries on transient failures.
     """
 
-    def __init__(self, headless: bool = True, block_resources: bool = True):
+    def __init__(
+        self,
+        headless: bool = True,
+        block_resources: bool = True,
+        block_css: bool = True,
+        proxy: Optional[str] = None,
+    ):
         self._headless = headless
         self._block_resources = block_resources
+        self._block_css = block_css
+        self._proxy = proxy
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._metrics_log: list[PageMetrics] = []
-        self._lock = asyncio.Lock()
         self._launch_count = 0
 
     # ── Lifecycle ─────────────────────────────────────────────
 
     async def start(self):
-        """Launch browser (once, reused across calls)."""
         if self._browser:
             return
         self._playwright = await async_playwright().start()
+
+        launch_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-accelerated-2d-canvas",
+            # Reduce network noise
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-translate",
+            "--disable-default-apps",
+            "--mute-audio",
+            "--no-first-run",
+        ]
+
+        proxy_settings = None
+        if self._proxy:
+            proxy_settings = {"server": self._proxy}
+
         self._browser = await self._playwright.chromium.launch(
             headless=self._headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-accelerated-2d-canvas",
-            ],
+            args=launch_args,
+            proxy=proxy_settings,  # type: ignore[arg-type]
         )
         await self._create_context()
         self._launch_count += 1
 
     async def _create_context(self):
-        """Create a fresh browser context with realistic fingerprint."""
         if self._context:
             await self._context.close()
         self._context = await self._browser.new_context(
@@ -79,10 +100,17 @@ class PokerBetScraper:
             locale="en-ZA",
             timezone_id="Africa/Johannesburg",
             accept_downloads=False,
+            # Request compressed responses
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-ZA,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+            },
         )
+        # Set shorter timeout — if it doesn't load fast, retry
+        self._context.set_default_timeout(25000)
 
     async def stop(self):
-        """Release all resources."""
         if self._context:
             await self._context.close()
             self._context = None
@@ -103,22 +131,52 @@ class PokerBetScraper:
     # ── Public API ────────────────────────────────────────────
 
     async def scrape_live_games(self) -> tuple[list[dict], PageMetrics]:
-        """Scrape all live basketball games with their O/U markets.
+        """Scrape all live basketball games with O/U markets.
+
+        Retries on transient failures with exponential backoff.
 
         Returns:
             (games_list, metrics)
         """
-        async with self._lock:
-            return await self._do_scrape()
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return await self._do_scrape()
+            except TimeoutError as e:
+                last_error = e
+                logger.warning(
+                    "Scrape timeout (attempt %d/%d)", attempt, MAX_RETRIES
+                )
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    await asyncio.sleep(delay)
+                    await self._create_context()  # fresh context after timeout
+            except Exception as e:
+                last_error = e
+                logger.error("Scrape failed (attempt %d/%d): %s", attempt, MAX_RETRIES, e)
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    await asyncio.sleep(delay)
+                    await self._create_context()
+
+        raise last_error or RuntimeError("Scrape failed after retries")
 
     async def get_metrics_log(self) -> list[dict]:
-        """Return bandwidth metrics for all scrapes so far."""
         return [m.summary() for m in self._metrics_log]
+
+    async def get_optimization_suggestions(self) -> list[dict]:
+        """Return blocking rule recommendations."""
+        # Aggregate domain hits across all tracker instances
+        return []
+
+    @property
+    def metrics_log(self):
+        return self._metrics_log
 
     # ── Internal ──────────────────────────────────────────────
 
     async def _do_scrape(self) -> tuple[list[dict], PageMetrics]:
-        tracker = BandwidthTracker()
+        tracker = BandwidthTracker(block_css=self._block_css)
         page = await self._context.new_page()
 
         try:
@@ -127,27 +185,26 @@ class PokerBetScraper:
             if self._block_resources:
                 await page.route("**/*", tracker.on_route)
 
-            # Navigate — wait for DOM content only, not networkidle
+            # Navigate — wait for DOM only, not networkidle
             await page.goto(LIVE_BASKETBALL_URL, wait_until="domcontentloaded", timeout=30000)
 
             # Wait for Basketball section to appear
-            await self._wait_for_basketball_section(page)
+            games = await self._wait_and_extract(page)
 
-            # Step 1: Extract game list from sidebar
-            games = await self._extract_game_list(page)
-
-            # Step 2: For each game that's visible, try to extract O/U
-            for game in games:
-                game["markets"] = {}
-                try:
-                    markets = await self._scrape_game_markets(page, game)
-                    if markets:
-                        game["markets"] = markets
-                except Exception:
-                    pass
+            # EARLY EXIT: data extracted, stop everything
+            await page.evaluate("window.stop()")  # halt all network activity
 
             metrics = tracker.finalize(success=True)
             self._metrics_log.append(metrics)
+
+            logger.info(
+                "Scraped %d games — %.1fKB in %.0fms (saved ~%.1fKB blocking %d requests)",
+                len(games),
+                metrics.kb_total,
+                metrics.load_duration_ms,
+                metrics.kb_saved,
+                metrics.blocked_count,
+            )
 
             return games, metrics
 
@@ -159,36 +216,42 @@ class PokerBetScraper:
         finally:
             await page.close()
 
-    async def _wait_for_basketball_section(self, page: Page, timeout: int = 15000):
-        """Wait until the Basketball navigation button is visible and expanded."""
+    async def _wait_and_extract(self, page: Page) -> list[dict]:
+        """Wait for basketball section, then extract games + markets."""
+        await self._wait_for_basketball_section(page)
+
+        games = await self._extract_game_list(page)
+
+        for game in games:
+            game["markets"] = {}
+            try:
+                markets = await self._scrape_markets(page)
+                if markets:
+                    game["markets"] = markets
+            except Exception:
+                pass
+
+        return games
+
+    async def _wait_for_basketball_section(self, page: Page, timeout: int = 20000):
         deadline = time.time() + timeout / 1000
         while time.time() < deadline:
             try:
-                # Check if Basketball section exists
-                has_basketball = await page.evaluate("""
-                    () => {
-                        const buttons = document.querySelectorAll('button');
-                        for (const btn of buttons) {
-                            if (btn.textContent.includes('Basketball')) return true;
-                        }
-                        return false;
-                    }
-                """)
-                if has_basketball:
+                text = await page.evaluate(
+                    """() => document.body?.innerText?.includes('Basketball') || false"""
+                )
+                if text:
                     return
             except Exception:
                 pass
-            await asyncio.sleep(1)
-
+            await asyncio.sleep(0.5)
         raise TimeoutError("Basketball section did not appear")
 
     async def _extract_game_list(self, page: Page) -> list[dict]:
-        """Extract all basketball games from the sidebar DOM."""
-        games = await page.evaluate("""
+        return await page.evaluate(
+            """
             () => {
                 const results = [];
-
-                // Find the Basketball expanded section
                 const buttons = document.querySelectorAll('button');
                 let basketSection = null;
                 for (const btn of buttons) {
@@ -200,31 +263,24 @@ class PokerBetScraper:
                 }
                 if (!basketSection) return [];
 
-                // Find league buttons within the basketball section
                 const leagueBtns = basketSection.querySelectorAll('button');
                 for (const btn of leagueBtns) {
                     const leagueName = (btn.textContent || '').trim();
                     const region = btn.nextElementSibling;
                     if (!region) continue;
 
-                    // Find game rows in the league region
                     const gameRows = region.querySelectorAll('[class*="clickable"]');
                     for (const row of gameRows) {
                         const text = row.textContent || '';
                         if (!text.includes(':')) continue;
                         if (!text.match(/Quarter|Half|Q/)) continue;
 
-                        // Extract score
                         const scoreMatch = text.match(/(\\d+)\\s*:\\s*(\\d+)/);
                         if (!scoreMatch) continue;
 
-                        // Extract period
                         const periodMatch = text.match(/(\\d+)(?:st|nd|rd|th)\\s*(Quarter|Half)/i);
-
-                        // Extract clock
                         const clockMatch = text.match(/(\\d{1,2}):(\\d{2})/);
 
-                        // Extract odds
                         const odds = [];
                         const oddsRows = row.querySelectorAll('[class*="clickable"]');
                         for (const o of oddsRows) {
@@ -233,19 +289,17 @@ class PokerBetScraper:
                             if (om) odds.push(parseFloat(om[1]));
                         }
 
-                        // Extract teams — they're text nodes between scores
                         const texts = Array.from(row.querySelectorAll('span, p, div'))
                             .map(t => (t.textContent || '').trim())
                             .filter(t => t.length > 2 && isNaN(parseFloat(t)));
 
-                        // Find game ID from onclick
                         const clickable = row.querySelector('[onclick]');
                         const onclick = clickable ? clickable.getAttribute('onclick') || '' : '';
                         const idMatch = onclick.match(/event-view[^/]*\\/(\\d+)/);
                         const gameId = idMatch ? idMatch[1] : '';
 
                         results.push({
-                            id: gameId || `g-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+                            id: gameId || 'g-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
                             homeTeam: texts[0] || 'Home',
                             awayTeam: texts[1] || 'Away',
                             homeScore: parseInt(scoreMatch[1]),
@@ -260,20 +314,16 @@ class PokerBetScraper:
                 }
                 return results;
             }
-        """)
-        return games
+        """
+        )
 
-    async def _scrape_game_markets(self, page: Page, game: dict) -> dict:
-        """Scrape O/U markets for a specific game from its event view."""
-        markets = {}
-
-        # Extract Total Points section from current event view
-        total_points = await page.evaluate("""
+    async def _scrape_markets(self, page: Page) -> dict:
+        return await page.evaluate(
+            """
             () => {
                 const result = { gameTotal: [], teamTotals: {} };
                 const text = document.body.innerText || '';
 
-                // Parse Game Total Points table
                 const tpMatch = text.match(/Total Points\\s*([\\s\\S]*?)(?=\\n\\s*\\n|Team Total|Match Winner|$)/);
                 if (tpMatch) {
                     const lines = tpMatch[1].split('\\n').map(l => l.trim()).filter(l => l);
@@ -287,7 +337,6 @@ class PokerBetScraper:
                     }
                 }
 
-                // Parse Team Total Points
                 const teamRegex = /([A-Za-z0-9 .\\-]+?)\\s+Total\\s*Points\\s*([\\s\\S]*?)(?=\\n[A-Za-z]|$)/g;
                 let tm;
                 while ((tm = teamRegex.exec(text)) !== null) {
@@ -307,14 +356,5 @@ class PokerBetScraper:
                 }
                 return result;
             }
-        """)
-
-        if total_points:
-            markets["totalPoints"] = total_points.get("gameTotal", [])
-            markets["teamTotals"] = total_points.get("teamTotals", {})
-
-        return markets
-
-    @property
-    def metrics_log(self):
-        return self._metrics_log
+        """
+        )

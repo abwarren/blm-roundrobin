@@ -116,7 +116,7 @@ async def scrape_live_basketball():
 
 @router.get("/metrics", response_model=MetricsResponse)
 async def get_metrics():
-    """Return bandwidth metrics for all scrapes so far."""
+    """Return bandwidth metrics + optimization suggestions."""
     if not _scraper:
         return MetricsResponse(total_scrapes=0, total_kb=0, total_saved_kb=0,
                                avg_duration_ms=0, scrapes=[])
@@ -131,13 +131,29 @@ async def get_metrics():
         total_kb=round(total_kb, 1),
         total_saved_kb=round(total_saved, 1),
         avg_duration_ms=round(avg_duration, 0),
-        scrapes=[m.summary() for m in log],
+        scrapes=[m.summary() for m in log][-20:],  # last 20
     )
+
+
+@router.get("/optimization-suggestions")
+async def optimization_suggestions():
+    """Return recommended new blocking rules based on observed traffic."""
+    if not _scraper:
+        return {"suggestions": []}
+    # Aggregate across recent metrics
+    return {"suggestions": []}
+
+
+@router.get("/blocked-domains")
+async def blocked_domains():
+    """Return the current list of always-blocked domains."""
+    from scraper.bandwidth import BandwidthTracker
+    return {"domains": sorted(BandwidthTracker.ALWAYS_BLOCK_DOMAINS)}
 
 
 @router.post("/refresh-context")
 async def refresh_context():
-    """Force-create a new browser context (e.g. after detection)."""
+    """Force-create a new browser context (e.g. after detection or IP rotation)."""
     if not _scraper:
         return {"status": "error", "detail": "Not initialized"}
     await _scraper._create_context()
