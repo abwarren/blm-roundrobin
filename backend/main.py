@@ -6,6 +6,7 @@ Simple in-memory server. No DB required for v1.
 from __future__ import annotations
 import os, sys
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 _root = Path(__file__).resolve().parent
 if str(_root) not in sys.path:
@@ -26,6 +27,11 @@ from engine.calculator import calculate_combo_payout, calculate_summary, calcula
 from engine.templates import SYSTEM_TEMPLATES
 from engine.scenarios import simulate_x_wins
 from engine.optimizer import optimise_for_ev
+
+
+# ── Scraper ─────────────────────────────────────────────────────
+from scraper.service import PokerBetScraper
+from scraper.api import router as scraper_router, init as init_scraper
 
 
 # ── Schemas ─────────────────────────────────────────────────────
@@ -71,12 +77,30 @@ class GenerateOut(BaseModel):
     generated_at: str
 
 
+# ── Scraper singleton ──────────────────────────────────────────
+_scraper_instance: PokerBetScraper | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _scraper_instance
+    _scraper_instance = PokerBetScraper(headless=True, block_resources=True)
+    await _scraper_instance.start()
+    init_scraper(_scraper_instance)  # inject into API module
+    yield
+    if _scraper_instance:
+        await _scraper_instance.stop()
+
+
 # ── App ─────────────────────────────────────────────────────────
-app = FastAPI(title="BLM Round Robin API", version="0.1.0")
+app = FastAPI(title="BLM Round Robin API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 # ── Routes ─────────────────────────────────────────────────────
+
+# Include scraper routes
+app.include_router(scraper_router)
 
 @app.get("/health")
 async def health():
